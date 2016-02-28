@@ -1,0 +1,438 @@
+#!/usr/bin/perl
+
+# improvements:
+#
+# ideally, want to be able to capture dupes in here and prevent
+# them from ever being copied to the destination directory...
+#
+# check various parameters to see if files are very close
+#  e.g. file size, exif data
+#
+# might want to allow users to delete any files that are detected as dupes
+# (md5 check first, maybe?)
+#
+
+use strict;
+use vars qw($ORIGINAL_SCRIPT $P $VERSION $VERBOSE $OPTS $USAGE $DESCR $AUTHOR
+            $COPYRIGHT $ARGS_DESC $LOG_STDERR $LOG_FILE $LOG_FP $LOG_TSTAMP_FMT
+            $DEFAULTS  %m $IGNORE_REGEXP %FILETYPES_OUTPUT_DIR @SEARCH_DIRS);
+BEGIN {
+  $ORIGINAL_SCRIPT = $0;
+  my(@P) = split("/", $0);
+  $P = pop(@P);
+  my $dir = join('/', @P);
+  unshift(@INC, $dir);
+  ## If we're being run out of a bin/ directory and there is ../lib, then
+  ## add it to @INC
+  if ($P[$#P] eq 'bin') {
+    my @tmp = @P;
+    pop(@tmp);
+    my $tmp = join("/",@tmp)."/lib";
+    unshift(@INC, $tmp) if (-d $tmp);
+    $tmp .= "/perl";
+    unshift(@INC, $tmp) if (-d $tmp);
+  }
+  my $ndir = "$dir/../lib/perl5/site_perl";
+  unshift(@INC, $ndir) if (-d $ndir);
+}
+##
+use Data::Dumper;
+use File::Copy qw(move copy);
+use File::Path qw(make_path);
+use File::Basename;
+use File::Find::Duplicates qw(find_duplicate_files);
+use Image::ExifTool qw(:Public);
+use Getopt::Std;
+##
+$DEFAULTS =
+{ 
+};
+$VERSION = '0.1.0';
+$DESCR = 'Script to auto-sort media into dated directories';
+$AUTHOR = 'Chris Tracy <chris.t.tracy@gmail.com>';
+$VERBOSE = 0;
+$OPTS = 'hvV:o:sdxc';
+$COPYRIGHT = '(c) 2013.  All rights reserved.';
+$ARGS_DESC = 'directory';
+$LOG_STDERR = 1;
+$LOG_FILE = undef;
+$LOG_FP = undef;
+$LOG_TSTAMP_FMT = '%Y-%m-%d %H:%M:%S';
+$USAGE = <<__UsAGe__;
+options:
+        -h      print this message and exit
+        -v      be verbose
+        -V x    set verbosity to x (-v is the same as -V 1)
+        -o x    send output to file x
+
+        -s      search for media
+        -d dir  process files in dir
+        -x      expunge duplicate files
+        -c      use file modification date as create date (as last resort)
+
+examples:
+
+photosorter -s
+
+photosorter -x -d [directory] 
+
+__UsAGe__
+##
+## Begin Tweakables
+##
+$IGNORE_REGEXP = qr/\/\.DS_Store$/;
+
+%FILETYPES_OUTPUT_DIR = (
+  qr/^(AVI|MOV|3GP)$/i       => '/Users/Shared/Movies/Sorted_By_Date',
+  qr/^(JPEG|PNG|TIFF|ARW)$/i => '/Users/Shared/Pictures/Sorted_By_Date',
+# qr/^(AVI|MOV|3GP)$/i       => '/Users/Shared/Testing/Movies/Sorted_By_Date',
+# qr/^(JPEG|PNG|TIFF|ARW)$/i => '/Users/Shared/Testing/Pictures/Sorted_By_Date',
+);
+
+# we could try searching /Volumes/*/DCIM for media files
+@SEARCH_DIRS = (
+  '/Volumes/SANDISK-2GB/DCIM/100MSDCF',
+  '/Volumes/CANON/DCIM/101CANON',
+  '/Volumes/CANON_DC/DCIM/100CANON',
+  '/Volumes/CANON_DC/DCIM/102CANON',
+  '/Volumes/NO NAME/DCIM/100MSDCF',
+  '/Users/ctracy/Pictures/Photo Booth Library',
+  '/Users/Shared/Pictures/Export_New_iPhone_Pictures_Here',
+);
+##
+## End Tweakables
+##
+
+sub opts_str {
+  my $str = shift(@_);
+  my $dostr = "";
+  my $dvstr = "";
+  my @opts = split("", $str);
+  my $dvcol = 0;
+  my $maxdv = 30;
+  while (my $o = shift(@opts)) {
+    if ($opts[0] eq ':') {
+      shift(@opts);
+	    if ($dvcol > $maxdv) {
+        $dvstr .= ("\n" . (" " x 11));
+        $dvcol = 11;
+        $maxdv = 60;
+	    }
+	    $dvstr .= " " if length($dvstr);
+	    $dvstr .= "[-$o x]";
+	    $dvcol += 7;
+    } else {
+	    $dostr .= "[-" unless length($dostr);
+	    $dostr .= $o;
+    }
+  }
+  $dostr .= "]" if length($dostr);
+  my $dstr = $dostr;
+  $dstr .= " " if length($dstr);
+  $dstr .= $dvstr;
+  return $dstr;
+}
+##
+sub usage {
+  my $msg = shift(@_);
+  print STDERR sprintf("%9s: %s\n", "ERROR", $msg) if $msg;
+  print STDERR sprintf("%9s: %s\n", $P, $DESCR);
+  print STDERR sprintf("%9s: %s\n", "Version", $VERSION);
+  print STDERR sprintf("%9s: %s\n", "Copyright", $COPYRIGHT);
+  print STDERR sprintf("%9s: %s\n", "Author", $AUTHOR);
+  print STDERR sprintf("%9s: %s %s %s\n", "usage", $P, opts_str($OPTS),
+                       $ARGS_DESC);
+  print $USAGE;
+  if (scalar(@_)) {
+    my $nope = 0;
+    open(ME, "<$0") || ($nope=1);
+    unless ($nope) {
+	    my $in_history = 0;
+	    while (<ME>) {
+        next unless ($in_history || /^=head1\s+VERSION/);
+        if (/^=head1\s+VERSION/) {
+          $in_history = 1;
+          print STDERR "\n  ","-" x 20, "[ VERSION HISTORY ]", "-" x 20,"\n\n";
+          print STDERR sprintf("  %-7s   %-9s   %-7s %s\n",
+                               "VERS","WHEN","WHO","WHAT");
+          next;
+        } elsif ($in_history && /^=cut/) {
+          last;
+        } elsif ($in_history && ($_ !~ /^\s*$/)) {
+          print STDERR $_;
+        }
+	    }
+	    close(ME);
+    }
+  }
+  exit(defined($msg));
+}
+###
+sub ts {
+  my $fmt = $LOG_TSTAMP_FMT || "%Y-%m-%d %H:%M:%S";
+  return POSIX::strftime($fmt, localtime(time));
+}
+##
+sub log_msg {
+  my $lvl = shift(@_);
+  return unless $VERBOSE >= $lvl;
+  my $logmsg = "$P: " . ts() . " [$lvl] @_\n";
+  print STDERR $logmsg if $LOG_STDERR;
+  if ($LOG_FILE && !$LOG_FP) {
+    $LOG_FP = new IO::File(">> $LOG_FILE")
+        or die "$P: could not create log file $LOG_FILE: $!\n";
+  }
+  print $LOG_FP $logmsg if $LOG_FP;
+}
+##
+sub process($$$) {
+  my $file = shift;
+  my $expunge = shift;
+  my $usefilemodifydate = shift;
+  my $info = ImageInfo($file);
+  
+#    print "processing $file...\n";
+  
+  my $CreateDate;
+  if (defined($info->{'CreateDate'})) {
+    $CreateDate = $info->{'CreateDate'};
+  } elsif (defined($info->{'DateTimeOriginal'})) {
+    $CreateDate = $info->{'DateTimeOriginal'};
+# photo booth is crazy -- doesn't have CreateDate or DateTimeOriginal
+# create date is stored in FileModifyDate
+  } elsif (defined($info->{'Keywords'}) and
+           $info->{'Keywords'} eq "Photo Booth" and
+           defined($info->{'FileModifyDate'})) {
+    $CreateDate = $info->{'FileModifyDate'};
+  } elsif (defined($usefilemodifydate) and
+           $usefilemodifydate and
+           defined($info->{'FileModifyDate'})) {
+    $CreateDate = $info->{'FileModifyDate'};
+  } else {
+    print "Can't get creation date for $file!\n";
+    return;
+  }
+  if (!defined($CreateDate)) {
+    print "ERORR: Could not determine creation date of $file!\n";
+    return;
+  }
+  
+# hack for 3GP files from Treo, extract date from filename
+# or FileModifyDate (if filename doesn't work out)..
+  if ($file =~ /\/Video_(\d\d)(\d\d)(\d\d)_\d\d\d\.3gp$/) {
+    $CreateDate = '20' . $3 . ':' . $1 . ':' . $2;
+  } elsif ($file =~ /\.3gp/ and defined($info->{'FileModifyDate'})) {
+    $CreateDate = $info->{'FileModifyDate'};
+  }
+  
+  print "create date = $CreateDate\n";
+  
+  my $rename = 0;
+  if ($CreateDate =~ /(\d\d\d\d)[:-](\d\d)[:-]\d\d/) {
+    my $year = $1;
+    my $month = $2;
+    
+    
+    # figure out what output directory to use based on the type of file
+    my $dir;
+    if (defined($info->{'FileType'})) {
+	    foreach (keys %FILETYPES_OUTPUT_DIR) {
+        if ($info->{'FileType'} =~ $_) {
+          $dir = "$FILETYPES_OUTPUT_DIR{$_}/$year-$month";
+        }
+	    }
+    } else {
+	    print "ERROR: No FileType tag for $file!  Can't determine output directory...\n";
+	    return;
+    }
+    if (!defined($dir)) {
+	    print "ERROR: Couldn't determine output directory for $file!\n";
+	    return;
+    }
+    
+    my($filename, $directories, $suffix) = fileparse($file);
+    my $new_file = "$dir/$filename";
+    if (!-f $new_file) {
+	    $m{$file} = $new_file;
+	    print "moving $file\n   to: $m{$file}\n" if $VERBOSE;
+    } else {
+	    
+	    my @dupes = File::Find::Duplicates::find_duplicate_files($file, $new_file);
+	    my $dupe_found = 0;
+	    foreach my $dupeset (@dupes) { 
+        printf "skipping identical files %s\n (of size %d) hash to %s\n",
+        join(", ", @{$dupeset->files}), $dupeset->size, $dupeset->md5;
+        $dupe_found = 1;
+        
+        # override! (not normal behavior)
+        # $m{$file} = $new_file;
+
+        if ($expunge) {
+          unlink $file or warn "Could not unlink $file: $!";
+        }
+	    }
+
+=pod
+# XXX temp hack --- looks for files that have '-1' in them as well to consider dupes
+      my $ftemp;
+	    $ftemp = $new_file;
+	    if ($ftemp =~ /(\S+)\.(\S+)/) {
+        $ftemp = "$1-1.$2";
+      }
+	    my @dupes = File::Find::Duplicates::find_duplicate_files($file, "$dir/$ftemp");
+	    foreach my $dupeset (@dupes) { 
+        printf "skipping identical files %s\n (of size %d) hash to %s\n",
+        join(", ", @{$dupeset->files}), $dupeset->size, $dupeset->md5;
+        $dupe_found = 1;
+        # override! (not normal behavior)
+        # $m{$file} = $new_file;
+	    }
+      
+	    $ftemp = $new_file;
+	    if ($ftemp =~ /(\S+)\.(\S+)/) {
+        $ftemp = "$1-2.$2";
+	    }
+	    my @dupes = File::Find::Duplicates::find_duplicate_files($file, "$dir/$ftemp");
+	    foreach my $dupeset (@dupes) { 
+        printf "skipping identical files %s\n (of size %d) hash to %s\n",
+        join(", ", @{$dupeset->files}), $dupeset->size, $dupeset->md5;
+        $dupe_found = 1;
+        # override! (not normal behavior)
+        # $m{$file} = $new_file;
+	    }
+# XXX end temp hack
+=cut
+      
+	    if (!$dupe_found) {
+        $m{$file} = &collision_rename($new_file, $dir);
+        print "renaming $file\n     to: $m{$file}\n"; 
+        $rename = 1;
+	    } 
+    }
+  }
+  return $rename;
+}
+##
+sub collision_rename($$) {
+  my $file = shift;
+  my $dir = shift;
+  
+  my($filename, $directories, $suffix) = fileparse($file);
+  my $new_file = "$dir/$filename";
+  my $c = 1;
+  while (-f $new_file) {
+    my $f = $filename;
+    if ($f =~ /(\S+)\.(\S+)/) {
+	    $f = "$1-$c.$2";
+    } else {
+	    $f = "$f-$c";
+    }
+    $new_file = "$dir/$f";
+    $c++;
+  }
+  
+  return $new_file;
+}
+##
+
+## Main Program ############################################################
+ main: {
+   ## Parse CLA
+   my %opts;
+   usage() unless getopts($OPTS, \%opts);
+   usage(undef, 1) if $opts{h};
+   usage() unless scalar(@ARGV) or defined($opts{s});
+   usage() if !defined($opts{s}) and
+       !defined($opts{d});
+   
+   $VERBOSE = $opts{V} || $opts{v};
+   if (!defined($VERBOSE)) {
+     $VERBOSE = 0;
+   }
+   
+   $LOG_STDERR = $opts{s};
+   $LOG_FILE = $opts{l};
+   log_msg(2,qq{our args: }.join(' // ',@ARGV));
+   
+   print "processing files...\n";
+   my $count = 0;
+   my $error_count = 0;
+   my $rename_count = 0;
+
+   my @dirs_to_process;
+   if (defined($opts{s})) {
+     @dirs_to_process = @SEARCH_DIRS;
+   } else {
+     push @dirs_to_process, $ARGV[0];
+   }
+
+   foreach my $dir (@dirs_to_process) {
+     print "checking $dir\n";
+     next if !-e $dir;
+     print "found directory $dir, scanning...\n";
+     if (-d $dir) {
+       open I, "find \"$dir\" -type f -print |";
+       while(<I>) {
+         next if $_ =~ $IGNORE_REGEXP;
+         chomp;
+         $count++;
+         my $result = &process($_, $opts{x}, $opts{c});
+         if (defined($result)) {
+           $rename_count += $result;
+         } else {
+           print "ERROR: Could not successfully process file $_\n";
+           $error_count++;
+         }
+       }
+       close I;
+     } elsif (-f $dir) {
+       my $result = &process($dir);
+       if (defined($result)) {
+         $rename_count += $result;
+       } else {
+         print "ERROR: Could not successfully process file $_\n";
+       }
+     }
+   }
+   
+   my $res = "";
+   while ($res !~ /^(c|m)$/) {
+     print "\n\nfinished processing $count files.  $error_count errors. renaming $rename_count files.\npress 'c' to copy, 'm' to move, or ^C to abort...\n";
+     $res = <>;
+     chomp $res;
+   }
+   
+   print "\n\nstarting...\n";
+   foreach (sort keys %m) {
+     my($filename, $directories, $suffix) = fileparse($m{$_});
+     
+     if (!-d $directories) {
+       print "creating directory '$directories'\n";
+       make_path($directories, { verbose => 0 });
+     }
+     if ($res eq 'c') {
+       print "copying $_\n   to: $m{$_}\n\n";
+       copy($_, $m{$_});
+       system("exiftool \"-DateTimeOriginal>FileModifyDate\" $m{$_}");
+     } elsif ($res eq 'm') {
+       print "moving $_\n   to: $m{$_}\n\n";
+       move($_, $m{$_});
+     }
+   }
+   exit 0;
+}
+
+__END__
+
+=head1 VERSION HISTORY
+
+  0.1.0   25 Mar 2013     ctracy     started
+
+=cut
+
+# Local variables:
+# tab-width: 2
+# perl-indent-level: 2
+# indent-tabs-mode: nil
+# comment-column: 40
+# End:
