@@ -83,7 +83,7 @@ __UsAGe__
 $IGNORE_REGEXP = qr/\/\.DS_Store$/;
 
 %FILETYPES_OUTPUT_DIR = (
-  qr/^(AVI|MOV|3GP)$/i       => '/Users/Shared/Movies/Sorted_By_Date',
+  qr/^(AVI|MOV|3GP|MP4)$/i   => '/Users/Shared/Movies/Sorted_By_Date',
   qr/^(JPEG|PNG|TIFF|ARW)$/i => '/Users/Shared/Pictures/Sorted_By_Date',
 # qr/^(AVI|MOV|3GP)$/i       => '/Users/Shared/Testing/Movies/Sorted_By_Date',
 # qr/^(JPEG|PNG|TIFF|ARW)$/i => '/Users/Shared/Testing/Pictures/Sorted_By_Date',
