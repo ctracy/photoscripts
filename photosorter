@@ -15,7 +15,8 @@
 use strict;
 use vars qw($ORIGINAL_SCRIPT $P $VERSION $VERBOSE $OPTS $USAGE $DESCR $AUTHOR
             $COPYRIGHT $ARGS_DESC $LOG_STDERR $LOG_FILE $LOG_FP $LOG_TSTAMP_FMT
-            $DEFAULTS  %m $IGNORE_REGEXP %FILETYPES_OUTPUT_DIR @SEARCH_DIRS);
+            $DEFAULTS  %m $IGNORE_REGEXP %FILETYPES_OUTPUT_DIR @SEARCH_DIRS
+            %dest_dirs);
 BEGIN {
   $ORIGINAL_SCRIPT = $0;
   my(@P) = split("/", $0);
@@ -414,6 +415,10 @@ sub collision_rename($$) {
        print "creating directory '$directories'\n";
        make_path($directories, { verbose => 0 });
      }
+
+     # Track the destination directory
+     $dest_dirs{$directories} = 1;
+     
      if ($res eq 'c') {
        print "copying $_\n   to: $m{$_}\n\n";
        copy($_, $m{$_});
@@ -423,6 +428,14 @@ sub collision_rename($$) {
        move($_, $m{$_});
      }
    }
+
+   # Add summary of destination directories at the end
+   print "\nSummary of destination directories:\n";
+   print "-" x 40 . "\n";
+   foreach my $dir (sort keys %dest_dirs) {
+     print "$dir\n";
+   }
+
    exit 0;
 }
 
