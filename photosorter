@@ -83,8 +83,8 @@ __UsAGe__
 $IGNORE_REGEXP = qr/\/\.DS_Store$/;
 
 %FILETYPES_OUTPUT_DIR = (
-  qr/^(AVI|MOV|3GP|MP4)$/i   => '/Users/Shared/Movies/Sorted_By_Date',
-  qr/^(JPEG|PNG|TIFF|ARW)$/i => '/Users/Shared/Pictures/Sorted_By_Date',
+  qr/^(AVI|MOV|3GP|MP4|M2TS)$/i   => '/Users/Shared/Movies/Sorted_By_Date',
+  qr/^(JPEG|GIF|PNG|TIFF|ARW)$/i  => '/Users/Shared/Pictures/Sorted_By_Date',
 # qr/^(AVI|MOV|3GP)$/i       => '/Users/Shared/Testing/Movies/Sorted_By_Date',
 # qr/^(JPEG|PNG|TIFF|ARW)$/i => '/Users/Shared/Testing/Pictures/Sorted_By_Date',
 );
@@ -96,8 +96,9 @@ $IGNORE_REGEXP = qr/\/\.DS_Store$/;
   '/Volumes/CANON_DC/DCIM/100CANON',
   '/Volumes/CANON_DC/DCIM/102CANON',
   '/Volumes/NO NAME/DCIM/100MSDCF',
-  '/Users/ctracy/Pictures/Photo Booth Library',
-  '/Users/Shared/Pictures/Export_New_iPhone_Pictures_Here',
+  '/Volumes/NO NAME/DCIM/101MSDCF',
+#  '/Users/ctracy/Pictures/Photo Booth Library',
+#  '/Users/Shared/Pictures/Export_New_iPhone_Pictures_Here',
 );
 ##
 ## End Tweakables
@@ -190,8 +191,9 @@ sub process($$$) {
   my $expunge = shift;
   my $usefilemodifydate = shift;
   my $info = ImageInfo($file);
-  
-#    print "processing $file...\n";
+
+  print "processing $file...\n" if $VERBOSE;
+#  print Dumper($info) if $VERBOSE;
   
   my $CreateDate;
   if (defined($info->{'CreateDate'})) {
@@ -374,6 +376,8 @@ sub collision_rename($$) {
        open I, "find \"$dir\" -type f -print |";
        while(<I>) {
          next if $_ =~ $IGNORE_REGEXP;
+         # sidecar XMP files ignored for now but will be moved if they exist
+         next if $_ =~ /\.xmp/i;
          chomp;
          $count++;
          my $result = &process($_, $opts{x}, $opts{c});
