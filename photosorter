@@ -16,7 +16,7 @@ use strict;
 use vars qw($ORIGINAL_SCRIPT $P $VERSION $VERBOSE $OPTS $USAGE $DESCR $AUTHOR
             $COPYRIGHT $ARGS_DESC $LOG_STDERR $LOG_FILE $LOG_FP $LOG_TSTAMP_FMT
             $DEFAULTS  %m $IGNORE_REGEXP %FILETYPES_OUTPUT_DIR @SEARCH_DIRS
-            %dest_dirs);
+            %dest_dirs %duplicate_stats %file_actions %file_types);
 BEGIN {
   $ORIGINAL_SCRIPT = $0;
   my(@P) = split("/", $0);
@@ -52,7 +52,7 @@ $VERSION = '0.1.0';
 $DESCR = 'Script to auto-sort media into dated directories';
 $AUTHOR = 'Chris Tracy <chris.t.tracy@gmail.com>';
 $VERBOSE = 0;
-$OPTS = 'hvV:o:sdxc';
+$OPTS = 'hvV:o:sdxck';
 $COPYRIGHT = '(c) 2013.  All rights reserved.';
 $ARGS_DESC = 'directory';
 $LOG_STDERR = 1;
@@ -70,12 +70,15 @@ options:
         -d dir  process files in dir
         -x      expunge duplicate files
         -c      use file modification date as create date (as last resort)
+        -k      skip files that would need renaming (avoid collisions)
 
 examples:
 
 photosorter -s
 
 photosorter -x -d [directory] 
+
+photosorter -k -d [directory]  # Skip renaming files
 
 __UsAGe__
 ##
@@ -135,6 +138,18 @@ sub opts_str {
   return $dstr;
 }
 ##
+sub format_bytes {
+    my $bytes = shift;
+    return "0 B" unless $bytes;
+    my @units = qw(B KB MB GB TB);
+    my $i = 0;
+    while ($bytes >= 1024 && $i < $#units) {
+        $bytes /= 1024;
+        $i++;
+    }
+    return sprintf("%.2f %s", $bytes, $units[$i]);
+}
+##
 sub usage {
   my $msg = shift(@_);
   print STDERR sprintf("%9s: %s\n", "ERROR", $msg) if $msg;
@@ -175,6 +190,37 @@ sub ts {
   return POSIX::strftime($fmt, localtime(time));
 }
 ##
+sub print_action_summary {
+    my ($action_type) = @_;
+    
+    print "\nFile Operation Summary:\n";
+    print "=" x 60 . "\n";
+    
+    # Summary by action type
+    print "Actions to be performed:\n";
+    print "-" x 40 . "\n";
+    printf "Files to %s: %d\n", $action_type, scalar(keys %m);
+    printf "Files skipped (would need renaming): %d\n", 
+           scalar(keys %{$file_actions{skipped}});
+    printf "Duplicate files found: %d\n", 
+           scalar(keys %{$file_actions{duplicate}});
+    
+    # Summary by file type
+    print "\nFile types being processed:\n";
+    print "-" x 40 . "\n";
+    foreach my $type (sort keys %file_types) {
+        printf "%-10s: %d files\n", $type, $file_types{$type};
+    }
+    
+    # Destination directory summary
+    print "\nDestination directories:\n";
+    print "-" x 40 . "\n";
+    foreach my $dir (sort keys %dest_dirs) {
+        my $count = grep { $m{$_} =~ /^\Q$dir\E/ } keys %m;
+        printf "%s: %d files\n", $dir, $count;
+    }
+}
+##
 sub log_msg {
   my $lvl = shift(@_);
   return unless $VERBOSE >= $lvl;
@@ -187,11 +233,12 @@ sub log_msg {
   print $LOG_FP $logmsg if $LOG_FP;
 }
 ##
-sub process($$$) {
+sub process($$$$) {
   my $file = shift;
   my $expunge = shift;
   my $usefilemodifydate = shift;
   my $info = ImageInfo($file);
+  my $opts_k = shift;
 
   print "processing $file...\n" if $VERBOSE;
 #  print Dumper($info) if $VERBOSE;
@@ -255,25 +302,44 @@ sub process($$$) {
     
     my($filename, $directories, $suffix) = fileparse($file);
     my $new_file = "$dir/$filename";
-    if (!-f $new_file) {
-	    $m{$file} = $new_file;
-	    print "moving $file\n   to: $m{$file}\n" if $VERBOSE;
-    } else {
-	    
-	    my @dupes = File::Find::Duplicates::find_duplicate_files($file, $new_file);
-	    my $dupe_found = 0;
-	    foreach my $dupeset (@dupes) { 
-        printf "skipping identical files %s\n (of size %d) hash to %s\n",
-        join(", ", @{$dupeset->files}), $dupeset->size, $dupeset->md5;
-        $dupe_found = 1;
-        
-        # override! (not normal behavior)
-        # $m{$file} = $new_file;
 
-        if ($expunge) {
-          unlink $file or warn "Could not unlink $file: $!";
+    if (!-f $new_file) {
+        $m{$file} = $new_file;
+        $file_actions{copy}{$file} = $new_file;
+        print "moving $file\n   to: $m{$file}\n" if $VERBOSE;
+    } else {
+        my @dupes = File::Find::Duplicates::find_duplicate_files($file, $new_file);
+        my $dupe_found = 0;
+        foreach my $dupeset (@dupes) {
+          my $size = $dupeset->size;
+          my $md5 = $dupeset->md5;
+        
+          # Track duplicate statistics
+          $duplicate_stats{total_count}++;
+          $duplicate_stats{total_size} += $size;
+          $duplicate_stats{by_size}{$size}++;
+          push @{$duplicate_stats{files}}, {
+            original => $new_file,
+            duplicate => $file,
+            size => $size,
+            md5 => $md5
+          };
+          
+          printf "skipping identical files %s\n (of size %d) hash to %s\n",
+              join(", ", @{$dupeset->files}), $dupeset->size, $dupeset->md5;
+          $dupe_found = 1;
+          
+          # override! (not normal behavior)
+          # $m{$file} = $new_file;
+          
+          if ($dupe_found) {
+            $file_actions{duplicate}{$file} = $new_file;
+          }
+          if ($expunge) {
+            unlink $file or warn "Could not unlink $file: $!";
+            $duplicate_stats{expunged}++;
+          }
         }
-	    }
 
 =pod
 # XXX temp hack --- looks for files that have '-1' in them as well to consider dupes
@@ -305,14 +371,27 @@ sub process($$$) {
 	    }
 # XXX end temp hack
 =cut
-      
-	    if (!$dupe_found) {
-        $m{$file} = &collision_rename($new_file, $dir);
-        print "renaming $file\n     to: $m{$file}\n"; 
-        $rename = 1;
-	    } 
+
+        if (!$dupe_found) {
+            if (defined($opts_k)) {  # Skip renaming if -k option is set
+                print "skipping $file (would require renaming)\n" if $VERBOSE;
+                $file_actions{skipped}{$file} = $new_file;
+                delete $m{$file};  # Remove from files to process
+                return 0;
+            } else {
+                $m{$file} = &collision_rename($new_file, $dir);
+                $file_actions{rename}{$file} = $m{$file};
+                print "renaming $file\n     to: $m{$file}\n";
+                $rename = 1;
+            }
+        }
+ 
     }
   }
+
+  # Track file type
+  $file_types{$info->{FileType}}++ if $info->{FileType};
+
   return $rename;
 }
 ##
@@ -348,6 +427,14 @@ sub collision_rename($$) {
    usage() if !defined($opts{s}) and
        !defined($opts{d});
    
+   %file_actions = (
+     copy => {},
+     rename => {},
+     duplicate => {},
+     skipped => {}
+       );
+   %file_types = ();
+
    $VERBOSE = $opts{V} || $opts{v};
    if (!defined($VERBOSE)) {
      $VERBOSE = 0;
@@ -381,7 +468,7 @@ sub collision_rename($$) {
          next if $_ =~ /\.xmp/i;
          chomp;
          $count++;
-         my $result = &process($_, $opts{x}, $opts{c});
+         my $result = &process($_, $opts{x}, $opts{c}, $opts{k});
          if (defined($result)) {
            $rename_count += $result;
          } else {
@@ -400,42 +487,82 @@ sub collision_rename($$) {
      }
    }
    
+   # Print duplicate files summary
+   if (%duplicate_stats) {
+     print "\nDuplicate Files Summary:\n";
+     print "=" x 60 . "\n";
+     print "Total duplicate files found: " . ($duplicate_stats{total_count} || 0) . "\n";
+     print "Total space taken by duplicates: " . 
+         format_bytes($duplicate_stats{total_size} || 0) . "\n";
+     if ($opts{x}) {
+       print "Files expunged: " . ($duplicate_stats{expunged} || 0) . "\n";
+     }
+     
+     print "\nDuplicates by size:\n";
+     print "-" x 40 . "\n";
+     foreach my $size (sort {$a <=> $b} keys %{$duplicate_stats{by_size}}) {
+       printf "%10s: %d files\n", 
+           format_bytes($size),
+           $duplicate_stats{by_size}{$size};
+     }
+     
+     if ($VERBOSE) {
+       print "\nDetailed duplicate listing:\n";
+       print "-" x 60 . "\n";
+       foreach my $dupe (@{$duplicate_stats{files}}) {
+         print "Original : $dupe->{original}\n";
+         print "Duplicate: $dupe->{duplicate}\n";
+         print "Size    : " . format_bytes($dupe->{size}) . "\n";
+         print "MD5     : $dupe->{md5}\n\n";
+       }
+     }
+   }
+
    my $res = "";
-   while ($res !~ /^(c|m)$/) {
-     print "\n\nfinished processing $count files.  $error_count errors. renaming $rename_count files.\npress 'c' to copy, 'm' to move, or ^C to abort...\n";
-     $res = <>;
-     chomp $res;
-   }
+    while ($res !~ /^(c|m)$/) {
+        # Print summary before asking for action
+        print_action_summary($res eq 'c' ? "copy" : "move");
+        
+        print "\npress 'c' to copy, 'm' to move, or ^C to abort...\n";
+        $res = <>;
+        chomp $res;
+    }
+
+    print "\n\nstarting $res operation...\n";
+    foreach (sort keys %m) {
+        my($filename, $directories, $suffix) = fileparse($m{$_});
+
+        if (!-d $directories) {
+            print "creating directory '$directories'\n";
+            make_path($directories, { verbose => 0 });
+        }
+
+        $dest_dirs{$directories} = 1;
+
+        if ($res eq 'c') {
+            print "copying $_\n   to: $m{$_}\n\n";
+            copy($_, $m{$_});
+            system("exiftool \"-DateTimeOriginal>FileModifyDate\" $m{$_}");
+        } elsif ($res eq 'm') {
+            print "moving $_\n   to: $m{$_}\n\n";
+            move($_, $m{$_});
+        }
+    }
+
+    # Final summary after operations
+   print "\nOperation completed.\n";
+   print "=" x 60 . "\n";
+   printf "Files processed: %d\n", scalar(keys %m);
+   printf "Files skipped: %d\n", scalar(keys %{$file_actions{skipped}});
+   printf "Duplicates found: %d\n", scalar(keys %{$file_actions{duplicate}});
    
-   print "\n\nstarting...\n";
-   foreach (sort keys %m) {
-     my($filename, $directories, $suffix) = fileparse($m{$_});
-     
-     if (!-d $directories) {
-       print "creating directory '$directories'\n";
-       make_path($directories, { verbose => 0 });
-     }
-
-     # Track the destination directory
-     $dest_dirs{$directories} = 1;
-     
-     if ($res eq 'c') {
-       print "copying $_\n   to: $m{$_}\n\n";
-       copy($_, $m{$_});
-       system("exiftool \"-DateTimeOriginal>FileModifyDate\" $m{$_}");
-     } elsif ($res eq 'm') {
-       print "moving $_\n   to: $m{$_}\n\n";
-       move($_, $m{$_});
-     }
-   }
-
    # Add summary of destination directories at the end
    print "\nSummary of destination directories:\n";
    print "-" x 40 . "\n";
    foreach my $dir (sort keys %dest_dirs) {
      print "$dir\n";
    }
-
+   
    exit 0;
 }
 
